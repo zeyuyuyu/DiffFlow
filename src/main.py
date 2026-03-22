@@ -1,46 +1,81 @@
-import os
-import git
-import openai
-from pathlib import Path
-from typing import Dict, List
+#!/usr/bin/env python3
+
+from dataclasses import dataclass
+from typing import List, Tuple
+import difflib
+import sys
+
+@dataclass
+class DiffBlock:
+    old_start: int
+    old_lines: List[str]
+    new_start: int 
+    new_lines: List[str]
+    change_type: str  # 'modify', 'add', 'delete'
 
 class DiffFlow:
-    def __init__(self, repo_path: str):
-        self.repo_path = Path(repo_path)
-        self.repo = git.Repo(repo_path)
-        self.openai_client = openai.Client()
+    def __init__(self, old_text: str, new_text: str):
+        self.old_lines = old_text.splitlines()
+        self.new_lines = new_text.splitlines()
+        self.differ = difflib.SequenceMatcher(None, self.old_lines, self.new_lines)
+        self.diff_blocks = []
 
-    def analyze_changes(self) -> Dict[str, List[str]]:
-        diff = self.repo.index.diff(None)
-        impact_map = {}
-        
-        for change in diff:
-            file_path = change.a_path
-            changed_content = self._get_file_diff(change)
-            impact = self._analyze_impact(file_path, changed_content)
-            impact_map[file_path] = impact
+    def compute_diff(self) -> List[DiffBlock]:
+        for tag, i1, i2, j1, j2 in self.differ.get_opcodes():
+            if tag == 'equal':
+                continue
             
-        return impact_map
-    
-    def _get_file_diff(self, change) -> str:
-        return change.diff.decode('utf-8')
-    
-    def _analyze_impact(self, file_path: str, content: str) -> List[str]:
-        # AI-powered impact analysis
-        response = self.openai_client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {"role": "system", "content": "Analyze code change impact"},
-                {"role": "user", "content": f"Analyze impact:\n{content}"}
-            ]
-        )
-        return self._parse_impact_response(response)
+            block = DiffBlock(
+                old_start=i1,
+                old_lines=self.old_lines[i1:i2],
+                new_start=j1,
+                new_lines=self.new_lines[j1:j2],
+                change_type=tag
+            )
+            self.diff_blocks.append(block)
+        return self.diff_blocks
+
+    def visualize_side_by_side(self, width: int = 80) -> str:
+        """Generate side-by-side diff visualization"""
+        output = []
+        half_width = (width - 3) // 2
+
+        for block in self.diff_blocks:
+            # Format line numbers
+            old_num = f"{block.old_start + 1:<4}"
+            new_num = f"{block.new_start + 1:<4}"
+
+            # Handle different change types
+            if block.change_type == 'replace':
+                for old, new in zip(block.old_lines, block.new_lines):
+                    old_part = f"{old_num} {old:{half_width}}"
+                    new_part = f"{new_num} {new:{half_width}}"
+                    output.append(f"{old_part} | {new_part}")
+
+            elif block.change_type == 'delete':
+                for old in block.old_lines:
+                    output.append(f"{old_num} {old:{half_width}} | {' ' * (half_width + 4)}")
+
+            elif block.change_type == 'insert':
+                for new in block.new_lines:
+                    output.append(f"{' ' * (half_width + 4)} | {new_num} {new:{half_width}}")
+
+        return '\n'.join(output)
 
 def main():
-    flow = DiffFlow(os.getcwd())
-    impact = flow.analyze_changes()
-    print("Change Impact Analysis:")
-    print(json.dumps(impact, indent=2))
+    # Example usage
+    old_text = """def hello():
+    print('Hello')
+    return True"""
 
-if __name__ == "__main__":
+    new_text = """def hello_world():
+    print('Hello World!')
+    return True
+    # Added comment"""
+
+    differ = DiffFlow(old_text, new_text)
+    blocks = differ.compute_diff()
+    print(differ.visualize_side_by_side())
+
+if __name__ == '__main__':
     main()
