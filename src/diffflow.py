@@ -1,99 +1,93 @@
-# DiffFlow - Intelligent Diff Highlighting
-from typing import List, Tuple, Optional
-import re
+"""DiffFlow core implementation for tracking and managing diffs with version control."""
 
-class DiffHighlighter:
+from typing import Dict, List, Optional
+import hashlib
+import json
+from datetime import datetime
+
+class DiffFlow:
     def __init__(self):
-        self.language_patterns = {
-            'python': {
-                'function': r'def\s+([a-zA-Z_][a-zA-Z0-9_]*)',
-                'class': r'class\s+([a-zA-Z_][a-zA-Z0-9_]*)',
-                'import': r'^import\s+.*|^from\s+.*\s+import\s+.*'
-            }
+        self.diffs: Dict[str, List[Dict]] = {}
+        self.versions: Dict[str, str] = {}
+        self._current_version = '0'
+
+    def _generate_hash(self, content: str) -> str:
+        """Generate a unique hash for content."""
+        return hashlib.sha256(content.encode()).hexdigest()[:8]
+
+    def add_diff(self, source: str, target: str, diff_content: str) -> str:
+        """Add a new diff with versioning support."""
+        diff_id = self._generate_hash(diff_content)
+        timestamp = datetime.utcnow().isoformat()
+
+        diff_entry = {
+            'id': diff_id,
+            'source': source,
+            'target': target,
+            'content': diff_content,
+            'timestamp': timestamp,
+            'version': str(int(self._current_version) + 1)
         }
 
-    def highlight_diff(self, old_code: str, new_code: str, language: str = 'python') -> List[Tuple[str, str]]:
-        """Analyzes and highlights meaningful differences between code versions.
+        if source not in self.diffs:
+            self.diffs[source] = []
 
-        Args:
-            old_code: Previous version of the code
-            new_code: Current version of the code
-            language: Programming language for syntax awareness
+        self.diffs[source].append(diff_entry)
+        self._current_version = diff_entry['version']
+        self.versions[self._current_version] = diff_id
 
-        Returns:
-            List of tuples containing (change_type, highlighted_diff)
-        """
-        old_lines = old_code.split('\n')
-        new_lines = new_code.split('\n')
-        changes = []
+        return diff_id
 
-        # Track structural elements
-        old_elements = self._extract_elements(old_code, language)
-        new_elements = self._extract_elements(new_code, language)
+    def get_diff(self, diff_id: str) -> Optional[Dict]:
+        """Retrieve a specific diff by ID."""
+        for source_diffs in self.diffs.values():
+            for diff in source_diffs:
+                if diff['id'] == diff_id:
+                    return diff
+        return None
 
-        for change in self._compute_diff(old_lines, new_lines):
-            change_type = change[0]
-            content = change[1]
+    def rollback_to_version(self, version: str) -> bool:
+        """Rollback to a specific version."""
+        if version not in self.versions:
+            return False
 
-            if change_type == 'added':
-                highlighted = self._highlight_syntax(content, language)
-                if self._is_significant_change(content, new_elements):
-                    changes.append(('significant_add', highlighted))
-                else:
-                    changes.append(('minor_add', highlighted))
+        # Remove all diffs after the specified version
+        for source in self.diffs:
+            self.diffs[source] = [d for d in self.diffs[source] if int(d['version']) <= int(version)]
 
-            elif change_type == 'removed':
-                highlighted = self._highlight_syntax(content, language)
-                if self._is_significant_change(content, old_elements):
-                    changes.append(('significant_remove', highlighted))
-                else:
-                    changes.append(('minor_remove', highlighted))
+        # Update current version
+        self._current_version = version
+        return True
 
-        return changes
+    def export_state(self) -> str:
+        """Export current state as JSON."""
+        state = {
+            'diffs': self.diffs,
+            'versions': self.versions,
+            'current_version': self._current_version
+        }
+        return json.dumps(state, indent=2)
 
-    def _extract_elements(self, code: str, language: str) -> dict:
-        """Extracts important code elements based on language patterns."""
-        elements = {'functions': [], 'classes': [], 'imports': []}
-        patterns = self.language_patterns.get(language, {})
+    def import_state(self, state_json: str) -> bool:
+        """Import state from JSON."""
+        try:
+            state = json.loads(state_json)
+            self.diffs = state['diffs']
+            self.versions = state['versions']
+            self._current_version = state['current_version']
+            return True
+        except (json.JSONDecodeError, KeyError):
+            return False
 
-        for element_type, pattern in patterns.items():
-            matches = re.finditer(pattern, code)
-            elements[element_type] = [m.group(1) if m.groups() else m.group(0) for m in matches]
-
-        return elements
-
-    def _compute_diff(self, old_lines: List[str], new_lines: List[str]) -> List[Tuple[str, str]]:
-        """Computes basic diff between line sequences."""
-        from difflib import SequenceMatcher
-        matcher = SequenceMatcher(None, old_lines, new_lines)
-        changes = []
-
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == 'replace':
-                changes.extend([('removed', line) for line in old_lines[i1:i2]])
-                changes.extend([('added', line) for line in new_lines[j1:j2]])
-            elif tag == 'delete':
-                changes.extend([('removed', line) for line in old_lines[i1:i2]])
-            elif tag == 'insert':
-                changes.extend([('added', line) for line in new_lines[j1:j2]])
-
-        return changes
-
-    def _highlight_syntax(self, line: str, language: str) -> str:
-        """Applies syntax highlighting to a line of code."""
-        # Basic syntax highlighting - can be extended for more complex highlighting
-        patterns = self.language_patterns.get(language, {})
-        highlighted = line
-
-        for element_type, pattern in patterns.items():
-            highlighted = re.sub(pattern, f'**\\1**' if '\\1' in pattern else f'**{pattern}**', highlighted)
-
-        return highlighted
-
-    def _is_significant_change(self, content: str, elements: dict) -> bool:
-        """Determines if a change is structurally significant."""
-        # Check if change affects function/class definitions or imports
-        return any(
-            content.strip().startswith(elem) for elem_list in elements.values()
-            for elem in elem_list
-        )
+    def get_version_history(self) -> List[Dict]:
+        """Get complete version history."""
+        history = []
+        for version, diff_id in sorted(self.versions.items()):
+            diff = self.get_diff(diff_id)
+            if diff:
+                history.append({
+                    'version': version,
+                    'diff_id': diff_id,
+                    'timestamp': diff['timestamp']
+                })
+        return history
