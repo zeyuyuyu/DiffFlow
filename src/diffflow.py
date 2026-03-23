@@ -1,93 +1,110 @@
-"""DiffFlow core implementation for tracking and managing diffs with version control."""
-
-from typing import Dict, List, Optional
-import hashlib
-import json
-from datetime import datetime
+"""DiffFlow - Intelligent diff and patch handling."""
+from typing import List, Tuple, Optional
+import difflib
 
 class DiffFlow:
     def __init__(self):
-        self.diffs: Dict[str, List[Dict]] = {}
-        self.versions: Dict[str, str] = {}
-        self._current_version = '0'
-
-    def _generate_hash(self, content: str) -> str:
-        """Generate a unique hash for content."""
-        return hashlib.sha256(content.encode()).hexdigest()[:8]
-
-    def add_diff(self, source: str, target: str, diff_content: str) -> str:
-        """Add a new diff with versioning support."""
-        diff_id = self._generate_hash(diff_content)
-        timestamp = datetime.utcnow().isoformat()
-
-        diff_entry = {
-            'id': diff_id,
-            'source': source,
-            'target': target,
-            'content': diff_content,
-            'timestamp': timestamp,
-            'version': str(int(self._current_version) + 1)
+        self.conflict_strategies = {
+            'smart_merge': self._smart_merge,
+            'take_source': lambda s, t: s,
+            'take_target': lambda s, t: t
         }
 
-        if source not in self.diffs:
-            self.diffs[source] = []
+    def generate_diff(self, source: str, target: str) -> List[str]:
+        """Generate a diff between source and target strings."""
+        diff = difflib.unified_diff(
+            source.splitlines(keepends=True),
+            target.splitlines(keepends=True)
+        )
+        return list(diff)
 
-        self.diffs[source].append(diff_entry)
-        self._current_version = diff_entry['version']
-        self.versions[self._current_version] = diff_id
+    def apply_patch(self, source: str, diff: List[str], 
+                    strategy: str = 'smart_merge') -> Tuple[str, bool]:
+        """Apply a diff to source text with intelligent conflict resolution.
+        Returns (patched_text, had_conflicts)"""
+        if strategy not in self.conflict_strategies:
+            raise ValueError(f'Unknown strategy: {strategy}')
 
-        return diff_id
+        lines = source.splitlines()
+        current_line = 0
+        patched_lines = []
+        had_conflicts = False
 
-    def get_diff(self, diff_id: str) -> Optional[Dict]:
-        """Retrieve a specific diff by ID."""
-        for source_diffs in self.diffs.values():
-            for diff in source_diffs:
-                if diff['id'] == diff_id:
-                    return diff
-        return None
+        for diff_line in diff:
+            if diff_line.startswith('---') or diff_line.startswith('+++'): 
+                continue
+            
+            if diff_line.startswith('-'):
+                if current_line >= len(lines) or \
+                   lines[current_line] != diff_line[1:].strip():
+                    had_conflicts = True
+                    resolved = self.conflict_strategies[strategy](
+                        diff_line[1:].strip(),
+                        lines[current_line] if current_line < len(lines) else ''
+                    )
+                    patched_lines.append(resolved)
+                current_line += 1
+            elif diff_line.startswith('+'):
+                patched_lines.append(diff_line[1:].strip())
+            else:
+                if current_line < len(lines):
+                    patched_lines.append(lines[current_line])
+                current_line += 1
 
-    def rollback_to_version(self, version: str) -> bool:
-        """Rollback to a specific version."""
-        if version not in self.versions:
+        # Append any remaining lines
+        while current_line < len(lines):
+            patched_lines.append(lines[current_line])
+            current_line += 1
+
+        return '\n'.join(patched_lines), had_conflicts
+
+    def _smart_merge(self, source_line: str, target_line: str) -> str:
+        """Intelligently merge conflicting lines using similarity matching."""
+        if not source_line or not target_line:
+            return source_line or target_line
+
+        # Use sequence matcher to find similarities
+        matcher = difflib.SequenceMatcher(None, source_line, target_line)
+        ratio = matcher.ratio()
+
+        if ratio > 0.8:  # Lines are very similar
+            # Use the longer line as it likely contains more information
+            return source_line if len(source_line) > len(target_line) else target_line
+        elif ratio > 0.5:  # Moderate similarity
+            # Try to combine unique parts
+            matching_blocks = matcher.get_matching_blocks()
+            result = []
+            last_a = last_b = 0
+            
+            for a, b, size in matching_blocks:
+                # Add unique parts from both strings
+                if a > last_a:
+                    result.append(source_line[last_a:a])
+                if b > last_b:
+                    result.append(target_line[last_b:b])
+                # Add matching part
+                if size > 0:
+                    result.append(source_line[a:a+size])
+                last_a = a + size
+                last_b = b + size
+
+            return ''.join(result).strip()
+        else:
+            # Too different - preserve source
+            return source_line
+
+    def validate_patch(self, patch: List[str]) -> bool:
+        """Validate patch format and structure."""
+        if not patch:
             return False
 
-        # Remove all diffs after the specified version
-        for source in self.diffs:
-            self.diffs[source] = [d for d in self.diffs[source] if int(d['version']) <= int(version)]
+        has_header = False
+        has_content = False
 
-        # Update current version
-        self._current_version = version
-        return True
+        for line in patch:
+            if line.startswith('---') or line.startswith('+++'):
+                has_header = True
+            elif line.startswith('-') or line.startswith('+') or line.startswith(' '):
+                has_content = True
 
-    def export_state(self) -> str:
-        """Export current state as JSON."""
-        state = {
-            'diffs': self.diffs,
-            'versions': self.versions,
-            'current_version': self._current_version
-        }
-        return json.dumps(state, indent=2)
-
-    def import_state(self, state_json: str) -> bool:
-        """Import state from JSON."""
-        try:
-            state = json.loads(state_json)
-            self.diffs = state['diffs']
-            self.versions = state['versions']
-            self._current_version = state['current_version']
-            return True
-        except (json.JSONDecodeError, KeyError):
-            return False
-
-    def get_version_history(self) -> List[Dict]:
-        """Get complete version history."""
-        history = []
-        for version, diff_id in sorted(self.versions.items()):
-            diff = self.get_diff(diff_id)
-            if diff:
-                history.append({
-                    'version': version,
-                    'diff_id': diff_id,
-                    'timestamp': diff['timestamp']
-                })
-        return history
+        return has_header and has_content
