@@ -1,66 +1,58 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
+import difflib
+from concurrent.futures import ProcessPoolExecutor
+from typing import List, Tuple, Optional
 
-class DiffFlow(nn.Module):
-    def __init__(self, input_dim, hidden_dims=[64, 128, 64], dropout=0.1, clip_threshold=1.0):
-        super().__init__()
-        self.input_dim = input_dim
-        self.clip_threshold = clip_threshold
-        
-        # Build network layers
-        layers = []
-        prev_dim = input_dim
-        
-        for hidden_dim in hidden_dims:
-            layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ])
-            prev_dim = hidden_dim
-            
-        self.network = nn.Sequential(*layers)
-        self.output_layer = nn.Linear(prev_dim, input_dim)
-        
-    def forward(self, x, time):
-        # Time embedding
-        time_emb = self._get_time_embedding(time)
-        x = torch.cat([x, time_emb], dim=-1)
-        
-        # Apply network with gradient clipping
-        with torch.enable_grad():
-            x.requires_grad_(True)
-            hidden = self.network(x)
-            output = self.output_layer(hidden)
-            
-            # Adaptive gradient clipping
-            if self.training:
-                gradients = torch.autograd.grad(output.sum(), x, create_graph=True)[0]
-                grad_norm = gradients.norm(p=2, dim=-1)
-                
-                # Calculate clipping factor
-                clip_coef = (self.clip_threshold / (grad_norm + 1e-6)).clamp(max=1.0)
-                output = output * clip_coef.unsqueeze(-1)
-        
-        return output
+class DiffFlow:
+    def __init__(self, max_workers: Optional[int] = None):
+        self.max_workers = max_workers
     
-    def _get_time_embedding(self, time):
-        # Sinusoidal time embedding
-        freqs = torch.exp(
-            -math.log(10000) * torch.arange(start=0, end=self.input_dim//4) / (self.input_dim//4)
-        ).to(time.device)
-        
-        args = time[:, None] * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if self.input_dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-        
-        return embedding
+    def compare_strings(self, str1: str, str2: str) -> List[str]:
+        """Compare two strings and return diff in unified format"""
+        diff = difflib.unified_diff(
+            str1.splitlines(keepends=True),
+            str2.splitlines(keepends=True)
+        )
+        return list(diff)
     
-    def loss_fn(self, x0, t, noise):
-        x_noisy = x0 + noise * torch.sqrt(t.reshape(-1, 1))
-        predicted = self(x_noisy, t)
-        return F.mse_loss(predicted, noise)
+    def batch_compare(self, pairs: List[Tuple[str, str]]) -> List[List[str]]:
+        """Compare multiple pairs of strings in parallel
+        
+        Args:
+            pairs: List of (str1, str2) tuples to compare
+            
+        Returns:
+            List of diffs for each pair
+        """
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            results = list(executor.map(
+                lambda p: self.compare_strings(p[0], p[1]),
+                pairs
+            ))
+        return results
+    
+    def similarity_score(self, str1: str, str2: str) -> float:
+        """Calculate similarity score between two strings
+        
+        Returns float between 0 (completely different) and 1 (identical)
+        """
+        matcher = difflib.SequenceMatcher(None, str1, str2)
+        return matcher.ratio()
+    
+    def batch_similarity(self, pairs: List[Tuple[str, str]]) -> List[float]:
+        """Calculate similarity scores for multiple string pairs in parallel"""
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            scores = list(executor.map(
+                lambda p: self.similarity_score(p[0], p[1]),
+                pairs
+            ))
+        return scores
+    
+    def find_closest_match(self, target: str, candidates: List[str]) -> Tuple[str, float]:
+        """Find the closest matching string from a list of candidates
+        
+        Returns:
+            Tuple of (best_match, similarity_score)
+        """
+        scores = self.batch_similarity([(target, c) for c in candidates])
+        best_idx = max(range(len(scores)), key=scores.__getitem__)
+        return candidates[best_idx], scores[best_idx]
